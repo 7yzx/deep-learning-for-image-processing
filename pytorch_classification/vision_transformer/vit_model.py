@@ -21,9 +21,14 @@ def drop_path(x, drop_prob: float = 0., training: bool = False):
     if drop_prob == 0. or not training:
         return x
     keep_prob = 1 - drop_prob
+    # x.shape[0] 表示 batch 的大小，(1,) * (x.ndim - 1) 用于创建额外的维度。
     shape = (x.shape[0],) + (1,) * (x.ndim - 1)  # work with diff dim tensors, not just 2D ConvNets
+    # 生成一个随机张量 random_tensor，其值在 [keep_prob, 1) 之间，用于确定哪些路径被保留下来。
     random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
+    #  random_tensor 中的某个元素小于 1，那么 floor_() 操作会将其变为 0；如果某个元素大于等于 1，那么它会变为 1。
     random_tensor.floor_()  # binarize
+    # 将输入张量 x 除以 keep_prob，然后乘以 random_tensor。
+    # 这一步实现了对路径的随机丢弃，如果 random_tensor 的某个元素为 0，则对应的路径就被丢弃。
     output = x.div(keep_prob) * random_tensor
     return output
 
@@ -46,18 +51,19 @@ class PatchEmbed(nn.Module):
     """
     def __init__(self, img_size=224, patch_size=16, in_c=3, embed_dim=768, norm_layer=None):
         super().__init__()
-        img_size = (img_size, img_size)
-        patch_size = (patch_size, patch_size)
+        img_size = (img_size, img_size)         # 224 * 224
+        patch_size = (patch_size, patch_size)        # 16 * 16
         self.img_size = img_size
         self.patch_size = patch_size
         self.grid_size = (img_size[0] // patch_size[0], img_size[1] // patch_size[1])
-        self.num_patches = self.grid_size[0] * self.grid_size[1]
+        self.num_patches = self.grid_size[0] * self.grid_size[1]        # 196
 
         self.proj = nn.Conv2d(in_c, embed_dim, kernel_size=patch_size, stride=patch_size)
-        self.norm = norm_layer(embed_dim) if norm_layer else nn.Identity()
+        self.norm = norm_layer(embed_dim) if norm_layer else nn.Identity() # 如果有normlayer的操作就执行，没有就什么也不执行
 
     def forward(self, x):
         B, C, H, W = x.shape
+        # 这里的大小一定是要是给定的224 224
         assert H == self.img_size[0] and W == self.img_size[1], \
             f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
 
@@ -80,6 +86,7 @@ class Attention(nn.Module):
         self.num_heads = num_heads
         head_dim = dim // num_heads
         self.scale = qk_scale or head_dim ** -0.5
+        # 分别生成3个 和 1个 一样的
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop_ratio)
         self.proj = nn.Linear(dim, dim)
@@ -97,7 +104,8 @@ class Attention(nn.Module):
         q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
 
         # transpose: -> [batch_size, num_heads, embed_dim_per_head, num_patches + 1]
-        # @: multiply -> [batch_size, num_heads, num_patches + 1, num_patches + 1]
+        # @: multiply -> [batch_size, num_heads, num_patches + 1, embed_dim_per_head]
+        # 这里是做矩阵乘法，最后两个维度相乘，k……T转置k
         attn = (q @ k.transpose(-2, -1)) * self.scale
         attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
@@ -117,7 +125,9 @@ class Mlp(nn.Module):
     """
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
         super().__init__()
+        # 没有特殊说明和input 的维度一样
         out_features = out_features or in_features
+        # 没有特殊说明和input保持一致
         hidden_features = hidden_features or in_features
         self.fc1 = nn.Linear(in_features, hidden_features)
         self.act = act_layer()
@@ -134,6 +144,9 @@ class Mlp(nn.Module):
 
 
 class Block(nn.Module):
+    """
+    一个Transformer Block
+    """
     def __init__(self,
                  dim,
                  num_heads,
@@ -152,6 +165,7 @@ class Block(nn.Module):
         # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
         self.drop_path = DropPath(drop_path_ratio) if drop_path_ratio > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
+        # mlp 中隐藏层的比例一般是4
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop_ratio)
 
@@ -162,6 +176,9 @@ class Block(nn.Module):
 
 
 class VisionTransformer(nn.Module):
+    """
+    一个完整的ViT类，其中distilled是DeiT的，目前不管
+    """
     def __init__(self, img_size=224, patch_size=16, in_c=3, num_classes=1000,
                  embed_dim=768, depth=12, num_heads=12, mlp_ratio=4.0, qkv_bias=True,
                  qk_scale=None, representation_size=None, distilled=False, drop_ratio=0.,
@@ -203,6 +220,7 @@ class VisionTransformer(nn.Module):
         self.pos_drop = nn.Dropout(p=drop_ratio)
 
         dpr = [x.item() for x in torch.linspace(0, drop_path_ratio, depth)]  # stochastic depth decay rule
+        #循环depth加入到blocks
         self.blocks = nn.Sequential(*[
             Block(dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
                   drop_ratio=drop_ratio, attn_drop_ratio=attn_drop_ratio, drop_path_ratio=dpr[i],
@@ -230,6 +248,7 @@ class VisionTransformer(nn.Module):
             self.head_dist = nn.Linear(self.embed_dim, self.num_classes) if num_classes > 0 else nn.Identity()
 
         # Weight init
+        # 这意味着初始化后的 pos_embed 张量中的值将服从一个以均值为 0、标准差为 0.02 的截断正态分布。
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
         if self.dist_token is not None:
             nn.init.trunc_normal_(self.dist_token, std=0.02)
